@@ -1,0 +1,37 @@
+#!/bin/bash
+#
+# Copyright 2016-present Google Inc. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+ZONE= # Must provide a zone. Run `gcloud compute zones list` for a list.
+
+# Recommended. Provide if you are using Mailgun to send mail.
+MAILGUN_APIKEY=
+MAILGUN_SMTP_DOMAIN_KEY_TXT=
+
+# Recommended. Provide if you intend to serve phabricator behind a custom domain.
+CUSTOM_DOMAIN=
+CUSTOM_DOMAIN_A_RECORD=
+CUSTOM_DOMAIN_AAAA_RECORD=
+
+# Only applies when CUSTOM_DOMAIN is provided.
+NOTIFICATIONS_SUBDOMAIN=n
+GIT_SUBDOMAIN=git
+
+# Only modify these if installing phabricator into an existing cluster.
+NETWORK_NAME=phabricator
+DNS_NAME=phabricator
+SQL_NAME=phabricator
+ADDRESS_NAME=phabricator
+VM_NAME=phabricator

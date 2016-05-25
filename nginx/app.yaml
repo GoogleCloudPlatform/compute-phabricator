@@ -1,0 +1,36 @@
+runtime: custom
+vm: true
+api_version: 1
+threadsafe: yes
+
+automatic_scaling:
+  min_num_instances: 2
+
+builtins:
+- appstats: on
+
+network:
+  name: phabricator
+
+handlers:
+- url: /favicon.ico
+  static_files: favicon.ico
+  upload: favicon.ico
+
+- url: /api/.*
+  script: dynamic
+
+- url: /res/.*
+  script: dynamic
+
+- url: /file/data/.*
+  script: dynamic
+
+- url: /ws/.*
+  script: dynamic
+
+- url: /auth/register/
+  script: dynamic
+
+- url: /.*
+  script: dynamic

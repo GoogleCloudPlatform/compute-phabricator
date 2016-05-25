@@ -1,0 +1,9 @@
+[submodule "vm/third_party/phabricator"]
+	path = vm/third_party/phabricator
+	url = https://github.com/phacility/phabricator.git
+[submodule "vm/third_party/arcanist"]
+	path = vm/third_party/arcanist
+	url = https://github.com/phacility/arcanist.git
+[submodule "vm/third_party/libphutil"]
+	path = vm/third_party/libphutil
+	url = https://github.com/phacility/libphutil.git

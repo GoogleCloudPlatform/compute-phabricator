@@ -1,0 +1,571 @@
+#!/bin/bash
+#
+# Copyright 2016-present Google Inc. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+. lib/init.sh
+
+# Terminate execution on command failure
+set -e
+
+if [[ ! -z "$CUSTOM_DOMAIN" && "$CUSTOM_DOMAIN_CONFIRMED" != "$PROJECT" ]]; then
+  echo -e ${RED}
+  echo "You have provided a custom domain of $CUSTOM_DOMAIN"
+  echo "In order to configure the domain you will need to perform the following steps:"
+  echo
+  echo "  1. Visit https://console.developers.google.com/appengine/settings/domains?project=$PROJECT"
+  echo
+  echo "  If $CUSTOM_DOMAIN is already listed there then your work is done here, otherwise continue with step 2:"
+  echo
+  echo "  2. Visit https://console.developers.google.com/appengine/settings/domains/add?project=$PROJECT"
+  echo "  3. Register your custom domain."
+  echo
+  echo "  Learn more about custom domains at https://cloud.google.com/appengine/docs/using-custom-domains-and-ssl?hl=en"
+  echo -e ${NC}
+
+  echo "Please press enter to confirm that you've registered $CUSTOM_DOMAIN as a custom domain, or Ctrl-C to quit."
+  read
+
+  if [ $(grep -c "^CUSTOM_DOMAIN_CONFIRMED" $CONFIG_PATH) -ne 0 ]; then
+    sed -i'.tmp' -e "s/^CUSTOM_DOMAIN_CONFIRMED=.*/CUSTOM_DOMAIN_CONFIRMED=$PROJECT/" $CONFIG_PATH
+    rm -rf $CONFIG_PATH.tmp
+  else
+    echo >> $CONFIG_PATH
+    echo "CUSTOM_DOMAIN_CONFIRMED=$PROJECT" >> $CONFIG_PATH
+  fi
+fi
+
+if [[ ! -z "$CUSTOM_DOMAIN" && -z "$CUSTOM_DOMAIN_A_RECORD" ]]; then
+  echo -e ${RED}
+  echo "You have provided a custom domain of $CUSTOM_DOMAIN"
+  echo "but you have not provided the necessary A records."
+  echo
+  echo "Retrieve the A records by visiting:"
+  echo
+  echo "  https://console.developers.google.com/appengine/settings/domains?project=$PROJECT"
+  echo
+  echo "Set the semicolon-separated values in CUSTOM_DOMAIN_A_RECORD within your config path:"
+  echo
+  echo "  $CONFIG_PATH"
+  echo
+  echo "Example:"
+  echo
+  echo "  CUSTOM_DOMAIN_A_RECORD=\"216.239.32.21; 216.239.34.21; 216.239.36.21; 216.239.38.21\""
+  echo
+  echo -e ${NC}
+  exit 1
+fi
+
+if [[ ! -z "$CUSTOM_DOMAIN" && -z "$CUSTOM_DOMAIN_AAAA_RECORD" ]]; then
+  echo -e ${RED}
+  echo "You have provided a custom domain of $CUSTOM_DOMAIN"
+  echo "but you have not provided the necessary AAAA records."
+  echo
+  echo "Retrieve the AAAA records by visiting:"
+  echo
+  echo "  https://console.developers.google.com/appengine/settings/domains?project=$PROJECT"
+  echo
+  echo "Set the semicolon-separated values in CUSTOM_DOMAIN_A_RECORD within your config path:"
+  echo
+  echo "  $CONFIG_PATH"
+  echo
+  echo "Example:"
+  echo
+  echo "  CUSTOM_DOMAIN_A_RECORD=\"2001:4860:4802:32::15; 2001:4860:4802:34::15; 2001:4860:4802:36::15; 2001:4860:4802:38::15\""
+  echo
+  echo -e ${NC}
+  exit 1
+fi
+
+if [[ ! -z "$MAILGUN_APIKEY" && -z "$MAILGUN_SMTP_DOMAIN_KEY_TXT" ]]; then
+  echo -e ${RED}
+  echo "You have provided a mailgun API key but no domain key"
+  echo
+  echo "  Config file: $CONFIG_PATH"
+  echo "  Likely Mailgun url: https://mailgun.com/app/domains/$CUSTOM_DOMAIN"
+  echo
+  echo "  Search for smtp._domainkey and set its **value** as the value"
+  echo "  of MAILGUN_SMTP_DOMAIN_KEY_TXT"
+  echo -e ${NC}
+  exit 1
+fi
+
+# TODO: Might not always be appspot - how do we configure this?
+PHABRICATOR_URL=$PROJECT.appspot.com
+PHABRICATOR_VERSIONED_URL=1-dot-$PROJECT.appspot.com
+
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+status "Checking gcloud auth..."
+if [ -z "$(gcloud auth list 2> /dev/null | grep \(active\))" ]; then
+  status_no
+
+  status "  Authenticating gcloud..."
+  gcloud auth login || { echo "Failed to authenticate gcloud."; exit 1; }
+fi
+status_ok
+
+status "APIs..."
+if ! gcloud_networks list >> /dev/null 2>&1; then
+  status_no
+
+  echo
+  echo "  Error: The Compute Engine API has not been enabled for $PROJECT."
+  echo
+  echo "  Please visit https://console.developers.google.com/apis/api/compute_component/overview?project=$PROJECT"
+  echo "  2. Enable API button"
+  echo "  3. Rerun this script"
+  echo
+  exit 1
+fi
+
+if ! gcloud_dns_zones list >> /dev/null 2>&1; then
+  status_no
+
+  echo
+  echo "  Error: Google Cloud DNS API has not been enabled for $PROJECT."
+  echo
+  echo "  1. Please visit https://console.developers.google.com/apis/api/dns/overview?project=$PROJECT"
+  echo "  2. Enable API button"
+  echo "  3. Rerun this script"
+  echo
+  exit 1
+fi
+status_ok
+
+status "Network..."
+if [ -z "$(gcloud_networks list | grep "\b$NETWORK_NAME\b")" ]; then
+  status_no
+  status "- Creating $NETWORK_NAME network..."
+  gcloud_networks create \
+    $NETWORK_NAME \
+    --mode auto \
+    2>&1 | logger || exit 1
+fi
+status_ok
+
+status "Static external IP..."
+if [ -z "$(gcloud_addresses list | grep "\b$ADDRESS_NAME\b")" ]; then
+  status_no
+
+  status "- Requesting static external IP..."
+  gcloud_addresses create $ADDRESS_NAME \
+    2>&1 | logger || exit 1
+fi
+status_ok
+
+STATIC_EXTERNAL_IP=$(gcloud_addresses list | grep "\b$ADDRESS_NAME\b" | cut -d' ' -f3)
+
+status "Compute instances..."
+if [ -z "$(gcloud_instances list | grep "\b$VM_NAME\b")" ]; then
+  status_no
+
+  status "- Creating $VM_NAME compute instance..."
+  gcloud_instances create "$VM_NAME" \
+    --address "$STATIC_EXTERNAL_IP" \
+    --boot-disk-size "10GB" \
+    --image "ubuntu-14-04" \
+    --machine-type "n1-standard-1" \
+    --network "$NETWORK_NAME" \
+    --zone "$ZONE" \
+    --tags "phabricator" \
+    --scopes sql,cloud-platform \
+    2>&1 | logger || exit 1
+fi
+status_ok
+
+status "  Waiting for compute instance to activate..."
+while [ -z "$(gcloud_instances list | grep "\b$VM_NAME\b")" ]; do
+  sleep 10
+done
+status_ok
+
+VM_INTERNAL_IP=$(gcloud_instances list | grep "\b$VM_NAME\b" | awk '{print $4}')
+VM_EXTERNAL_IP=$(gcloud_instances list | grep "\b$VM_NAME\b" | awk '{print $5}')
+
+status "internal IP: $VM_INTERNAL_IP. external IP: $VM_EXTERNAL_IP. "
+status_ok
+
+status "SQL..."
+if [ -z "$(gcloud_sql_instances list 2> /dev/null | grep "\b$SQL_NAME\b")" ]; then
+  status_no
+
+  # TODO: Once 2nd generation SQL is out of beta, move to the db-n1-standard-1 tier.
+
+  status "- Creating $SQL_NAME 1st generation SQL database (may take a few minutes)..."
+  gcloud_sql_instances create "$SQL_NAME" \
+    --activation-policy=ALWAYS \
+    --authorized-networks="$VM_EXTERNAL_IP" \
+    --assign-ip \
+    --backup-start-time="00:00" \
+    --gce-zone "$ZONE" \
+    --tier="D1" \
+    --pricing-plan="PACKAGE" \
+    --database-flags="sql_mode=STRICT_ALL_TABLES,ft_min_word_len=3,max_allowed_packet=33554432" \
+    2>&1 | logger || exit 1
+fi
+status_ok
+
+status "  Verifying SQL..."
+SQL_INSTANCE_NAME=$(gcloud_sql_instances list | grep "\b$SQL_NAME\b" | cut -d " " -f 1)
+if [ -z "${SQL_INSTANCE_NAME}" ]; then
+  status_no
+
+  echo "Failed to load the name of the Cloud SQL instance to use for Phabricator"
+  exit 1
+fi
+status_ok
+
+checkdisk() {
+  name=$1
+  status "$name disk..."
+  if [ -z "$(gcloud_disks list | grep "\b$name\b")" ]; then
+    status_no
+
+    status "- Creating..."
+    gcloud_disks create \
+      "$name" \
+      --size "200" \
+      --type "pd-standard" \
+      2>&1 | logger || exit 1
+  fi
+  status_ok
+
+  status "$name disk attached..."
+  if [ -z "$(gcloud_instances describe $VM_NAME --zone=$ZONE | grep "$name")" ]; then
+    status_no
+
+    status "- Attaching..."
+    gcloud_attach_disk \
+      --disk "$name" \
+      2>&1 | logger || exit 1
+  fi
+  status_ok
+}
+
+checkdisk "git-repos"
+checkdisk "file-storage"
+
+status "Allow internal http..."
+if [ -z "$(gcloud_firewall_rules list | grep "\b$NETWORK_NAME\b" | grep "\ballow-internal-http\b")" ]; then
+  status_no
+
+  REGION=$(gcloud_zones list | grep $ZONE | awk '{print $2}')
+  SUBNET_RANGE=$(gcloud_networks subnets list | grep $NETWORK_NAME | grep $REGION | awk '{print $4}')
+
+  status "- Creating firewall rule 'allow-internal-http'..."
+  gcloud_firewall_rules create \
+    allow-internal-http \
+    --allow "tcp:8080" \
+    --network "$NETWORK_NAME" \
+    --source-ranges "$SUBNET_RANGE" \
+    2>&1 | logger || exit 1
+fi
+status_ok
+
+# Sub-domain configuration
+
+if [ ! -z "$CUSTOM_DOMAIN" ]; then
+  status "Allow git ssh..."
+  if [[ ! -z "$GIT_SUBDOMAIN" && -z "$(gcloud_firewall_rules list | grep "\b$NETWORK_NAME\b" | grep "\ballow-git-ssh\b")" ]]; then
+    status_no
+
+    status "- Creating firewall rule 'allow-git-ssh'..."
+    gcloud_firewall_rules create \
+      allow-git-ssh \
+      --allow "tcp:22" \
+      --network "$NETWORK_NAME" \
+      --target-tags "phabricator" \
+      2>&1 | logger || exit 1
+  fi
+  status_ok
+
+  status "Allow notifications..."
+  if [[ ! -z "$NOTIFICATIONS_SUBDOMAIN" && -z "$(gcloud_firewall_rules list | grep "\b$NETWORK_NAME\b" | grep "\ballow-notifications\b")" ]]; then
+    status_no
+
+    status "- Creating firewall rule 'allow-notifications'..."
+    gcloud_firewall_rules create \
+      allow-notifications \
+      --allow "tcp:22280" \
+      --network "$NETWORK_NAME" \
+      --target-tags "phabricator" \
+      2>&1 | logger || exit 1
+  fi
+  status_ok
+
+  # Use the custom domain
+  PHABRICATOR_URL=$CUSTOM_DOMAIN
+  TOP_LEVEL_DOMAIN=$(echo $CUSTOM_DOMAIN | rev | cut -d'.' -f-2 | rev)
+
+  status "DNS for $CUSTOM_DOMAIN..."
+  if [ -z "$(gcloud_dns_zones list  2> /dev/null | grep "\b$DNS_NAME\b")" ]; then
+    status_no
+
+    status "- Creating DNS zone $DNS_NAME..."
+    gcloud_dns_zones create \
+      --dns-name="$TOP_LEVEL_DOMAIN" \
+      --description="phabricator DNS" \
+      $DNS_NAME \
+      2>&1 | logger || exit 1
+  fi
+  status_ok
+
+  # Abort any existing transaction
+  abort_existing_dns() {
+    if gcloud_dns_records transaction describe >> /dev/null 2>&1; then
+      gcloud_dns_records transaction abort 2>&1 | logger
+    fi
+  }
+
+  status "  Mailgun TXT..."
+  if [ -z "$(gcloud_dns_records list | grep "\bTXT\b" | grep "mailgun.org")" ]; then
+    status_no
+
+    abort_existing_dns
+
+    status "- Adding DNS TXT entry 'v=spf1 include:mailgun.org ~all'..."
+    gcloud_dns_records transaction start \
+      2>&1 | logger || exit 1
+    gcloud_dns_records transaction add \
+      --name="$TOP_LEVEL_DOMAIN." \
+      --ttl=21600 \
+      --type=TXT "v=spf1 include:mailgun.org ~all" \
+      2>&1 | logger || exit 1
+    gcloud_dns_records transaction execute \
+      2>&1 | logger || exit 1
+  fi
+  status_ok
+
+  status "  Mailgun SMTP TXT..."
+  if [ -z "$(gcloud_dns_records list | grep "\bTXT\b" | grep "k=rsa;")" ]; then
+    status_no
+
+    abort_existing_dns
+
+    status "- Adding DNS SMTP TXT entry 'smtp._domainkey'..."
+    gcloud_dns_records transaction start \
+      2>&1 | logger || exit 1
+    gcloud_dns_records transaction add \
+      --name="smtp._domainkey.$TOP_LEVEL_DOMAIN." \
+      --ttl=21600 \
+      --type=TXT "$MAILGUN_SMTP_DOMAIN_KEY_TXT" \
+      2>&1 | logger || exit 1
+    gcloud_dns_records transaction execute \
+      2>&1 | logger || exit 1
+  fi
+  status_ok
+
+  status "  Mailgun CNAME..."
+  if [ -z "$(gcloud_dns_records list | grep "\bCNAME\b" | grep "mailgun.org")" ]; then
+    status_no
+
+    abort_existing_dns
+
+    status "- Adding DNS CNAME entry email.$PHABRICATOR_URL. 'mailgun.org'..."
+    gcloud_dns_records transaction start \
+      2>&1 | logger || exit 1
+    gcloud_dns_records transaction add \
+      --name="email.$TOP_LEVEL_DOMAIN." \
+      --ttl=21600 \
+      --type=CNAME "mailgun.org." \
+      2>&1 | logger || exit 1
+    gcloud_dns_records transaction execute \
+      2>&1 | logger || exit 1
+  fi
+  status_ok
+
+  status "  Mailgun MX..."
+  if [ -z "$(gcloud_dns_records list | grep "\bMX\b" | grep "mxa.mailgun.org")" ]; then
+    status_no
+
+    abort_existing_dns
+
+    status "- Adding DNS MX entries for mailgun..."
+    gcloud_dns_records transaction start \
+      2>&1 | logger || exit 1
+    gcloud_dns_records transaction add \
+      --name="$TOP_LEVEL_DOMAIN." \
+      --ttl=21600 \
+      --type=MX "10 mxa.mailgun.org." "10 mxb.mailgun.org." \
+      2>&1 | logger || exit 1
+    gcloud_dns_records transaction execute \
+      2>&1 | logger || exit 1
+  fi
+  status_ok
+
+  ensure_record() {
+    recordtype=$1
+    status "  $recordtype record..."
+    if [[ -z "$(gcloud_dns_records list | grep "\b$recordtype\b" | grep "^$TOP_LEVEL_DOMAIN.")" ]]; then
+      status_no
+
+      abort_existing_dns
+
+      status "- Adding $recordtype entry..."
+      gcloud_dns_records transaction start \
+        2>&1 | logger || exit 1
+      gcloud_dns_records transaction add \
+        --name="$TOP_LEVEL_DOMAIN." \
+        --ttl=21600 \
+        --type="$recordtype" \
+        "${@:2}" \
+        2>&1 | logger || exit 1
+      gcloud_dns_records transaction execute \
+        2>&1 | logger || exit 1
+    fi
+    status_ok
+  }
+
+  if [ ! -z "$CUSTOM_DOMAIN_A_RECORD" ]; then
+    ensure_record A $CUSTOM_DOMAIN_A_RECORD
+  fi
+
+  if [ ! -z "$CUSTOM_DOMAIN_AAAA_RECORD" ]; then
+    ensure_record AAAA $CUSTOM_DOMAIN_AAAA_RECORD
+  fi
+
+  ensure_subdomain() {
+    name="$1"
+    status "  Subdomain: $name..."
+    if [[ -z "$(gcloud_dns_records list | grep "\bA\b" | grep "\b$name.$TOP_LEVEL_DOMAIN.")" ]]; then
+      status_no
+
+      abort_existing_dns
+
+      status "- Adding DNS subdomain entry $name..."
+      gcloud_dns_records transaction start \
+        2>&1 | logger || exit 1
+      gcloud_dns_records transaction add \
+        --name="$name.$TOP_LEVEL_DOMAIN." \
+        --ttl=60 \
+        --type=A \
+        $VM_EXTERNAL_IP \
+        2>&1 | logger || exit 1
+      gcloud_dns_records transaction execute \
+        2>&1 | logger || exit 1
+    fi
+    status_ok
+  }
+
+  if [ ! -z "$NOTIFICATIONS_SUBDOMAIN" ]; then
+    ensure_subdomain "$NOTIFICATIONS_SUBDOMAIN"
+  fi
+  if [ ! -z "$GIT_SUBDOMAIN" ]; then
+    ensure_subdomain "$GIT_SUBDOMAIN"
+  fi
+  
+  exit 1
+fi
+
+pushd $DIR/nginx >> /dev/null
+
+# TODO: Look into Network Load Balancing as an alternative to App Engine for nginx routing.
+# https://cloud.google.com/compute/docs/load-balancing/network/example
+
+status "Generating nginx.conf..."
+if [ -z "$PHABRICATOR_URL" ]; then
+  status_no
+
+  echo "No phabricator URL found...bailing out"
+  exit 1
+fi
+
+if [ -z "$VM_INTERNAL_IP" ]; then
+  status_no
+
+  echo "No internal IP found...bailing out"
+  exit 1
+fi
+
+cp nginx.conf.template nginx.conf
+sed -i.bak -e s/\\\$PHABRICATOR_URL/$PHABRICATOR_URL/ nginx.conf
+sed -i.bak -e s/\\\$PHABRICATOR_ALTERNATE_URL/$PHABRICATOR_VERSIONED_URL/ nginx.conf
+sed -i.bak -e s/\\\$PHABRICATOR_IP/$VM_INTERNAL_IP/ nginx.conf
+rm nginx.conf.bak
+status_ok
+
+COMPUTED_NGINX_SHA=$(find . -type f \( -exec shasum {} \; \) | shasum | cut -d' ' -f1)
+
+status "nginx deployed..."
+if [ "$COMPUTED_NGINX_SHA" != "$NGINX_SHA" ]; then
+  status_no
+
+  status "deploying nginx..."
+  gcloud_appengine deploy --version=1 --promote app.yaml || exit 1
+
+  popd >> /dev/null
+
+  NOW=$(date)
+
+  if [ $(grep -c "^NGINX_SHA" $CONFIG_PATH) -ne 0 ]; then
+    sed -i'.tmp' -e "s/^NGINX_SHA=.*/NGINX_SHA=$COMPUTED_NGINX_SHA # Generated $NOW/" $CONFIG_PATH
+    rm -rf $CONFIG_PATH.tmp
+  else
+    echo >> $CONFIG_PATH
+    echo "NGINX_SHA=$COMPUTED_NGINX_SHA # Generated $NOW" >> $CONFIG_PATH
+  fi
+
+  pushd $DIR/nginx >> /dev/null
+fi
+status_ok
+
+popd >> /dev/null
+
+open_ssh
+
+################ SERVER COMMANDS START HERE ################
+
+remote_exec "sudo apt-get -qq update && sudo apt-get install -y git" || exit 1
+remote_exec "if [ ! -d phabricator ]; then git clone $GITHUB_REPO; else cd phabricator; git fetch; git rebase origin/master; fi" || exit 1
+remote_exec "cd /opt;bash ~/phabricator/vm/install.sh $SQL_NAME http://$PHABRICATOR_URL http://$PHABRICATOR_VERSIONED_URL" || exit 1
+
+# Configure the startup script.
+remote_exec "cp ~/phabricator/vm/startup.sh .; \
+  sed -i.bak -e s/#TOP_LEVEL_DOMAIN=/TOP_LEVEL_DOMAIN=$TOP_LEVEL_DOMAIN/ startup.sh; \
+  sed -i.bak -e s/#VM_NAME=/VM_NAME=$VM_NAME/ startup.sh; \
+  sed -i.bak -e s/#DNS_NAME=/DNS_NAME=$DNS_NAME/ startup.sh" || exit 1
+
+if [ ! -z "$MAILGUN_APIKEY" ]; then
+  remote_exec "cd /opt;bash ~/phabricator/vm/configure_mailgun.sh $PHABRICATOR_URL $MAILGUN_APIKEY" || exit 1
+fi
+
+if [ ! -z "$CUSTOM_DOMAIN" ]; then
+  if [ ! -z "$GIT_SUBDOMAIN" ]; then
+    remote_exec "sed -i.bak -e s/#GIT_SUBDOMAIN=/GIT_SUBDOMAIN=$GIT_SUBDOMAIN/ startup.sh" || exit 1
+
+    remote_exec "cd /opt;bash ~/phabricator/vm/configure_ssh.sh $GIT_SUBDOMAIN.$TOP_LEVEL_DOMAIN" || exit 1
+
+    # Tag the machine so that we know how to ssh into it in the future
+    if [ -z "$(gcloud_instances describe $VM_NAME --zone=$ZONE | grep "ssh-222")" ]; then
+      gcloud_instances add-tags --zone=$ZONE $VM_NAME --tags ssh-222
+    fi
+
+    port="222"
+  fi
+
+  if [ ! -z "$NOTIFICATIONS_SUBDOMAIN" ]; then
+    remote_exec "sed -i.bak -e s/#NOTIFICATIONS_SUBDOMAIN=/NOTIFICATIONS_SUBDOMAIN=$NOTIFICATIONS_SUBDOMAIN/ startup.sh" || exit 1
+
+    remote_exec "cd /opt;sudo bash ~/phabricator/vm/configure_notifications.sh http://$NOTIFICATIONS_SUBDOMAIN.$TOP_LEVEL_DOMAIN" || exit 1
+    remote_exec "cd /opt/phabricator;sudo su aphlict -c './bin/aphlict restart'" || exit 1
+  fi
+fi
+
+# Install the startup script.
+remote_exec "sudo /google/google-cloud-sdk/bin/gcloud --quiet compute instances add-metadata $VM_NAME --metadata-from-file startup-script=startup.sh" || exit 1
+
+echo "Visit http://$PHABRICATOR_URL to set up your phabricator instance."
+echo "Visit https://console.developers.google.com/permissions/projectpermissions?project=$PROJECT to configure your project's permissions."
+echo "Setup complete."
