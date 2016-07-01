@@ -35,8 +35,7 @@ popd >> /dev/null
 # Start the notification server
 pushd phabricator >> /dev/null
 
-sudo ./bin/config set notification.enabled true
-sudo ./bin/config set notification.client-uri $NOTIFICATIONS_URL:22280
+sudo ./bin/config set notification.servers '[{"type":"client","host":"'$NOTIFICATIONS_URL'","port":22280,"protocol":"http"},{"type":"admin","host":"127.0.0.1","port":22281,"protocol":"http"}]'
 
 sudo touch /var/log/aphlict.log
 sudo chmod a+w /var/log/aphlict.log
