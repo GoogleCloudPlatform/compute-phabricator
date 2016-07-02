@@ -48,6 +48,9 @@ sudo apt-get -qq update
 sudo apt-get upgrade -y
 sudo apt-get autoremove -y
 
+# apt-get may have updated apache; ensure that it's truly stopped.
+sudo apachectl stop
+
 ### UPDATE WORKING COPIES ######################################################
 
 popd >> /dev/null
