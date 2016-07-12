@@ -51,6 +51,8 @@ else
   PHABRICATOR_ALTERNATE_BASE_URI=
 fi
 
+# uuid-runtime: required to generate our root password
+# jq: required for parsing the sql server json details
 sudo apt-get install -y uuid-runtime jq
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
