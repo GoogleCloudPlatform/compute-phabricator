@@ -167,7 +167,7 @@ gcloud_firewall_rules() {
 }
 
 gcloud_appengine() {
-  gcloud_project preview app "$@"
+  gcloud_project app "$@"
 }
 
 gcloud_sql_instances() {
