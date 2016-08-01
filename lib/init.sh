@@ -81,6 +81,7 @@ if [ -z "$PROJECT" ]; then
 fi
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+mkdir -p "$DIR/../config"
 CONFIG_ROOT_PATH="$( cd "$DIR/../config" && pwd )"
 CONFIG_PATH="$CONFIG_ROOT_PATH/$PROJECT"
 
